@@ -6,6 +6,7 @@ import {calAgent} from './agent'
 const app: Express = express()
 
 import cors from 'cors'
+import { start } from 'repl'
 app.use(cors())
 app.use(express.json())
 
@@ -40,11 +41,24 @@ async function startServer (){
         app.post('/chat/:threadId', async (req: Request, res: Response) => {
             const {threadId} = req.params
             const {message} = req.body
-            
-
+            try {
+                const response = await calAgent(client, message, threadId)
+                res.json({ response})
+                
+            } catch (error){
+            console.error('Error in Chat:',error)
+            res.status(500).json({error: 'Failed to continue conversation'})
+            }
         })
 
+        const PORT = process.env.PORT || 8000
+        app.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`)
+        })
     } catch (error){
-        console.error(error)
+        console.error('Error connecting to MongoDB:',error)
+        process.exit(1)
     }
 }
+
+startServer()
