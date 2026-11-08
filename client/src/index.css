@@ -1,8 +1,10 @@
+/* 全局基础样式（由 index.js 引入，作用于整个应用） */
 body {
-  margin: 0;
+  margin: 0;                /* 清除浏览器默认外边距 */
+  /* 系统字体栈：跨平台保持一致的默认观感 */
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  -webkit-font-smoothing: antialiased; /* WebKit 内核：字体抗锯齿，显示更细腻 */
+  -moz-osx-font-smoothing: grayscale;  /* Firefox（macOS）：字体灰度平滑 */
 }
