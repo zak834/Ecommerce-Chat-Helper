@@ -1,74 +1,74 @@
-// Import required modules from LangChain ecosystem
-import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai" // For creating vector embeddings from text using Gemini
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai" // Google's Gemini AI model
-import { AIMessage, BaseMessage, HumanMessage } from "@langchain/core/messages" // Message types for conversations
+// 从 LangChain 生态导入所需模块
+import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai" // 用于通过 Gemini 从文本创建向量嵌入
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai" // Google 的 Gemini AI 模型
+import { AIMessage, BaseMessage, HumanMessage } from "@langchain/core/messages" // 对话消息类型
 import {
-  ChatPromptTemplate,      // For creating structured prompts with placeholders
-  MessagesPlaceholder,     // Placeholder for dynamic message history
+  ChatPromptTemplate,      // 用于创建带占位符的结构化提示词
+  MessagesPlaceholder,     // 动态消息历史的占位符
 } from "@langchain/core/prompts"
-import { StateGraph } from "@langchain/langgraph"              // State-based workflow orchestration
-import { Annotation } from "@langchain/langgraph"              // Type annotations for state management
-import { tool } from "@langchain/core/tools"                   // For creating custom tools/functions
-import { ToolNode } from "@langchain/langgraph/prebuilt"       // Pre-built node for executing tools
-import { MongoDBSaver } from "@langchain/langgraph-checkpoint-mongodb" // For saving conversation state
-import { MongoDBAtlasVectorSearch } from "@langchain/mongodb"   // Vector search integration with MongoDB
-import { MongoClient } from "mongodb"                          // MongoDB database client
-import { z } from "zod"                                        // Schema validation library
-import "dotenv/config"                                         // Load environment variables from .env file
+import { StateGraph } from "@langchain/langgraph"              // 基于状态的工作流编排
+import { Annotation } from "@langchain/langgraph"              // 用于状态管理的类型注解
+import { tool } from "@langchain/core/tools"                   // 用于创建自定义工具/函数
+import { ToolNode } from "@langchain/langgraph/prebuilt"       // 用于执行工具的预构建节点
+import { MongoDBSaver } from "@langchain/langgraph-checkpoint-mongodb" // 用于保存对话状态
+import { MongoDBAtlasVectorSearch } from "@langchain/mongodb"   // MongoDB 向量搜索集成
+import { MongoClient } from "mongodb"                          // MongoDB 数据库客户端
+import { z } from "zod"                                        // 模式校验库
+import "dotenv/config"                                         // 从 .env 文件加载环境变量
 
-// Utility function to handle API rate limits with exponential backoff
+// 使用指数退避策略处理 API 速率限制的工具函数
 async function retryWithBackoff<T>(
-  fn: () => Promise<T>,    // The function to retry (generic type T for return value)
-  maxRetries = 3           // Maximum number of retry attempts (default 3)
+  fn: () => Promise<T>,    // 需要重试的函数（泛型 T 表示返回值类型）
+  maxRetries = 3           // 最大重试次数（默认 3 次）
 ): Promise<T> {
-  // Loop through retry attempts
+  // 循环执行重试尝试
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      return await fn()    // Try to execute the function
+      return await fn()    // 尝试执行函数
     } catch (error: any) {
-      // Check if it's a rate limit error (HTTP 429) and we have retries left
+      // 判断是否为速率限制错误（HTTP 429）且还有剩余重试次数
       if (error.status === 429 && attempt < maxRetries) {
-        // Calculate exponential backoff delay: 2^attempt seconds, max 30 seconds
+        // 计算指数退避延迟：2^attempt 秒，最长 30 秒
         const delay = Math.min(1000 * Math.pow(2, attempt), 30000)
         console.log(`Rate limit hit. Retrying in ${delay/1000} seconds...`)
-        // Wait for the calculated delay before retrying
+        // 等待计算出的延迟时间后再重试
         await new Promise(resolve => setTimeout(resolve, delay))
-        continue // Go to next iteration (retry)
+        continue // 进入下一次迭代（重试）
       }
-      throw error // If not rate limit or out of retries, throw the error
+      throw error // 如果不是速率限制错误或重试次数已用完，则抛出错误
     }
   }
-  throw new Error("Max retries exceeded") // This should never be reached
+  throw new Error("Max retries exceeded") // 理论上永远不会执行到这里
 }
 
-// Main function that creates and runs the AI agent
+// 创建并运行 AI 智能体的主函数
 export async function callAgent(client: MongoClient, query: string, thread_id: string) {
   try {
-    // Database configuration
-    const dbName = "inventory_database"        // Name of the MongoDB database
-    const db = client.db(dbName)              // Get database instance
-    const collection = db.collection("items") // Get the 'items' collection
+    // 数据库配置
+    const dbName = "inventory_database"        // MongoDB 数据库名称
+    const db = client.db(dbName)              // 获取数据库实例
+    const collection = db.collection("items") // 获取 'items' 集合
 
-    // Define the state structure for the agent workflow
+    // 定义智能体工作流的状态结构
     const GraphState = Annotation.Root({
       messages: Annotation<BaseMessage[]>({
-        // Reducer function: how to combine old and new messages
-        reducer: (x, y) => x.concat(y), // Simply concatenate old messages (x) with new messages (y)
+        // 归约函数：定义如何合并新旧消息
+        reducer: (x, y) => x.concat(y), // 简单地将旧消息（x）与新消息（y）拼接
       }),
     })
 
-    // Create a custom tool for searching furniture inventory
+    // 创建一个用于搜索家具库存的自定义工具
     const itemLookupTool = tool(
-      // The actual function that will be executed when tool is called
+      // 工具被调用时实际执行的函数
       async ({ query, n = 10 }) => {
         try {
           console.log("Item lookup tool called with query:", query)
 
-          // Check if database has any data at all
+          // 检查数据库中是否完全没有任何数据
           const totalCount = await collection.countDocuments()
           console.log(`Total documents in collection: ${totalCount}`)
 
-          // Early return if database is empty
+          // 如果数据库为空则提前返回
           if (totalCount === 0) {
             console.log("Collection is empty")
             return JSON.stringify({ 
@@ -78,65 +78,65 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
             })
           }
 
-          // Get sample documents for debugging purposes
+          // 获取示例文档用于调试
           const sampleDocs = await collection.find({}).limit(3).toArray()
           console.log("Sample documents:", sampleDocs)
 
-          // Configuration for MongoDB Atlas Vector Search
+          // MongoDB Atlas 向量搜索的配置
           const dbConfig = {
-            collection: collection,           // MongoDB collection to search
-            indexName: "vector_index",       // Name of the vector search index
-            textKey: "embedding_text",       // Field containing the text used for embeddings
-            embeddingKey: "embedding",       // Field containing the vector embeddings
+            collection: collection,           // 要搜索的 MongoDB 集合
+            indexName: "vector_index",       // 向量搜索索引的名称
+            textKey: "embedding_text",       // 存储用于生成嵌入的文本的字段
+            embeddingKey: "embedding",       // 存储向量嵌入的字段
           }
 
-          // Create vector store instance for semantic search using Google Gemini embeddings
+          // 使用 Google Gemini 嵌入创建向量存储实例，用于语义搜索
           const vectorStore = new MongoDBAtlasVectorSearch(
             new GoogleGenerativeAIEmbeddings({
-              apiKey: process.env.GOOGLE_API_KEY, // Google API key from environment
-              model: "text-embedding-004",         // Gemini embedding model
+              apiKey: process.env.GOOGLE_API_KEY, // 从环境变量获取 Google API 密钥
+              model: "text-embedding-004",         // Gemini 嵌入模型
             }),
             dbConfig
           )
 
           console.log("Performing vector search...")
-          // Perform semantic search using vector embeddings
+          // 使用向量嵌入执行语义搜索
           const result = await vectorStore.similaritySearchWithScore(query, n)
           console.log(`Vector search returned ${result.length} results`)
           
-          // If vector search returns no results, fall back to text search
+          // 如果向量搜索没有返回结果，则回退到文本搜索
           if (result.length === 0) {
             console.log("Vector search returned no results, trying text search...")
-            // MongoDB text search using regular expressions
+            // 使用正则表达式进行 MongoDB 文本搜索
             const textResults = await collection.find({
-              $or: [ // OR condition - match any of these fields
-                { item_name: { $regex: query, $options: 'i' } },        // Case-insensitive search in item name
-                { item_description: { $regex: query, $options: 'i' } }, // Case-insensitive search in description
-                { categories: { $regex: query, $options: 'i' } },       // Case-insensitive search in categories
-                { embedding_text: { $regex: query, $options: 'i' } }    // Case-insensitive search in embedding text
+              $or: [ // OR 条件 — 匹配以下任意一个字段
+                { item_name: { $regex: query, $options: 'i' } },        // 在商品名称中不区分大小写搜索
+                { item_description: { $regex: query, $options: 'i' } }, // 在商品描述中不区分大小写搜索
+                { categories: { $regex: query, $options: 'i' } },       // 在分类中不区分大小写搜索
+                { embedding_text: { $regex: query, $options: 'i' } }    // 在嵌入文本中不区分大小写搜索
               ]
-            }).limit(n).toArray() // Limit results and convert to array
+            }).limit(n).toArray() // 限制结果数量并转换为数组
             
             console.log(`Text search returned ${textResults.length} results`)
-            // Return text search results as JSON string
+            // 将文本搜索结果以 JSON 字符串形式返回
             return JSON.stringify({
               results: textResults,
-              searchType: "text",    // Indicate this was a text search
+              searchType: "text",    // 标明这是一次文本搜索
               query: query,
               count: textResults.length
             })
           }
 
-          // Return vector search results as JSON string
+          // 将向量搜索结果以 JSON 字符串形式返回
           return JSON.stringify({
             results: result,
-            searchType: "vector",   // Indicate this was a vector search
+            searchType: "vector",   // 标明这是一次向量搜索
             query: query,
             count: result.length
           })
           
         } catch (error: any) {
-          // Log detailed error information for debugging
+          // 输出详细的错误信息以便调试
           console.error("Error in item lookup:", error)
           console.error("Error details:", {
             message: error.message,
@@ -144,7 +144,7 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
             name: error.name
           })
           
-          // Return error information as JSON string
+          // 将错误信息以 JSON 字符串形式返回
           return JSON.stringify({ 
             error: "Failed to search inventory", 
             details: error.message,
@@ -152,50 +152,50 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
           })
         }
       },
-      // Tool metadata and schema definition
+      // 工具元数据与模式定义
       {
-        name: "item_lookup",                                    // Tool name that the AI will reference
-        description: "Gathers furniture item details from the Inventory database", // Description for the AI
-        schema: z.object({                                      // Input validation schema
-          query: z.string().describe("The search query"),      // Required string parameter
-          n: z.number().optional().default(10)                 // Optional number parameter with default
+        name: "item_lookup",                                    // AI 将引用的工具名称
+        description: "Gathers furniture item details from the Inventory database", // 供 AI 参考的工具描述
+        schema: z.object({                                      // 输入校验模式
+          query: z.string().describe("The search query"),      // 必需的字符串参数
+          n: z.number().optional().default(10)                 // 可选的数字参数，带默认值
             .describe("Number of results to return"),
         }),
       }
     )
 
-    // Array of all available tools (just one in this case)
+    // 所有可用工具的数组（本例中只有一个）
     const tools = [itemLookupTool]
-    // Create a tool execution node for the workflow
+    // 为工作流创建工具执行节点
     const toolNode = new ToolNode<typeof GraphState.State>(tools)
 
-    // Initialize the AI model (Google's Gemini)
+    // 初始化 AI 模型（Google 的 Gemini）
     const model = new ChatGoogleGenerativeAI({
-      model: "gemini-1.5-flash",         //  Use Gemini 1.5 Flash model
-      temperature: 0,                    // Deterministic responses (no randomness)
-      maxRetries: 0,                     // Disable built-in retries (we handle our own)
-      apiKey: process.env.GOOGLE_API_KEY, // Google API key from environment
-    }).bindTools(tools)                  // Bind our custom tools to the model
+      model: "gemini-1.5-flash",         // 使用 Gemini 1.5 Flash 模型
+      temperature: 0,                    // 确定性回复（无随机性）
+      maxRetries: 0,                     // 禁用内置重试（由我们自行处理）
+      apiKey: process.env.GOOGLE_API_KEY, // 从环境变量获取 Google API 密钥
+    }).bindTools(tools)                  // 将自定义工具绑定到模型
 
-    // Decision function: determines next step in the workflow
+    // 决策函数：确定工作流的下一步
     function shouldContinue(state: typeof GraphState.State) {
-      const messages = state.messages                               // Get all messages
-      const lastMessage = messages[messages.length - 1] as AIMessage // Get the most recent message
+      const messages = state.messages                               // 获取所有消息
+      const lastMessage = messages[messages.length - 1] as AIMessage // 获取最近的一条消息
 
-      // If the AI wants to use tools, go to tools node; otherwise end
+      // 如果 AI 想使用工具，则前往工具节点；否则结束
       if (lastMessage.tool_calls?.length) {
-        return "tools"  // Route to tool execution
+        return "tools"  // 路由到工具执行节点
       }
-      return "__end__"  // End the workflow
+      return "__end__"  // 结束工作流
     }
 
-    // Function that calls the AI model with retry logic
+    // 带重试逻辑调用 AI 模型的函数
     async function callModel(state: typeof GraphState.State) {
-      return retryWithBackoff(async () => { // Wrap in retry logic
-        // Create a structured prompt template
+      return retryWithBackoff(async () => { // 包裹在重试逻辑中
+        // 创建结构化的提示词模板
         const prompt = ChatPromptTemplate.fromMessages([
           [
-            "system", // System message defines the AI's role and behavior
+            "system", // 系统消息定义 AI 的角色和行为
             `You are a helpful E-commerce Chatbot Agent for a furniture store. 
 
 IMPORTANT: You have access to an item_lookup tool that searches the furniture inventory database. ALWAYS use this tool when customers ask about furniture items, even if the tool returns errors or empty results.
@@ -207,61 +207,61 @@ When using the item_lookup tool:
 
 Current time: {time}`,
           ],
-          new MessagesPlaceholder("messages"), // Placeholder for conversation history
+          new MessagesPlaceholder("messages"), // 对话历史的占位符
         ])
 
-        // Fill in the prompt template with actual values
+        // 用实际值填充提示词模板
         const formattedPrompt = await prompt.formatMessages({
-          time: new Date().toISOString(), // Current timestamp
-          messages: state.messages,       // All previous messages
+          time: new Date().toISOString(), // 当前时间戳
+          messages: state.messages,       // 所有历史消息
         })
 
-        // Call the AI model with the formatted prompt
+        // 使用格式化后的提示词调用 AI 模型
         const result = await model.invoke(formattedPrompt)
-        // Return new state with the AI's response added
+        // 返回添加了 AI 回复的新状态
         return { messages: [result] }
       })
     }
 
-    // Build the workflow graph
+    // 构建工作流图
     const workflow = new StateGraph(GraphState)
-      .addNode("agent", callModel)                    // Add AI model node
-      .addNode("tools", toolNode)                     // Add tool execution node
-      .addEdge("__start__", "agent")                  // Start workflow at agent
-      .addConditionalEdges("agent", shouldContinue)   // Agent decides: tools or end
-      .addEdge("tools", "agent")                      // After tools, go back to agent
+      .addNode("agent", callModel)                    // 添加 AI 模型节点
+      .addNode("tools", toolNode)                     // 添加工具执行节点
+      .addEdge("__start__", "agent")                  // 工作流从 agent 节点开始
+      .addConditionalEdges("agent", shouldContinue)   // 由 agent 决定：去 tools 还是结束
+      .addEdge("tools", "agent")                      // 工具执行后返回 agent 节点
 
-    // Initialize conversation state persistence
+    // 初始化对话状态持久化
     const checkpointer = new MongoDBSaver({ client, dbName })
-    // Compile the workflow with state saving
+    // 编译带有状态保存功能的工作流
     const app = workflow.compile({ checkpointer })
 
-    // Execute the workflow
+    // 执行工作流
     const finalState = await app.invoke(
       {
-        messages: [new HumanMessage(query)], // Start with user's question
+        messages: [new HumanMessage(query)], // 以用户的问题开始
       },
       { 
-        recursionLimit: 15,                   // Prevent infinite loops
-        configurable: { thread_id: thread_id } // Conversation thread identifier
+        recursionLimit: 15,                   // 防止无限循环
+        configurable: { thread_id: thread_id } // 对话线程标识符
       }
     )
 
-    // Extract the final response from the conversation
+    // 从对话中提取最终回复
     const response = finalState.messages[finalState.messages.length - 1].content
     console.log("Agent response:", response)
 
-    return response // Return the AI's final response
+    return response // 返回 AI 的最终回复
 
   } catch (error: any) {
-    // Handle different types of errors with user-friendly messages
+    // 针对不同类型的错误给出用户友好的提示信息
     console.error("Error in callAgent:", error.message)
     
-    if (error.status === 429) { // Rate limit error
+    if (error.status === 429) { // 速率限制错误
       throw new Error("Service temporarily unavailable due to rate limits. Please try again in a minute.")
-    } else if (error.status === 401) { // Authentication error
+    } else if (error.status === 401) { // 认证错误
       throw new Error("Authentication failed. Please check your API configuration.")
-    } else { // Generic error
+    } else { // 通用错误
       throw new Error(`Agent failed: ${error.message}`)
     }
   }
